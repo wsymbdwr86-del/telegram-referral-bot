@@ -1,0 +1,131 @@
+import os
+import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes
+)
+
+TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
+DB = "bot.db"
+
+
+def init_db():
+    with sqlite3.connect(DB) as con:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL DEFAULT 0,
+                invited_by INTEGER DEFAULT NULL,
+                banned INTEGER DEFAULT 0
+            )
+        """)
+
+
+def menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔗 رابط الدعوة", callback_data="ref")],
+        [InlineKeyboardButton("💰 رصيدي", callback_data="balance"),
+         InlineKeyboardButton("👥 إحالاتي", callback_data="refs")],
+        [InlineKeyboardButton("🎁 كود هدية", callback_data="gift")],
+        [InlineKeyboardButton("💸 طلب سحب", callback_data="withdraw")]
+    ])
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    with sqlite3.connect(DB) as con:
+        row = con.execute(
+            "SELECT banned FROM users WHERE user_id=?", (user.id,)
+        ).fetchone()
+
+        if row and row[0]:
+            await update.message.reply_text("🚫 حسابك محظور.")
+            return
+
+        if not row:
+            inviter = None
+            if context.args:
+                try:
+                    candidate = int(context.args[0])
+                    if candidate != user.id:
+                        exists = con.execute(
+                            "SELECT 1 FROM users WHERE user_id=?",
+                            (candidate,)
+                        ).fetchone()
+                        if exists:
+                            inviter = candidate
+                except ValueError:
+                    pass
+
+            con.execute(
+                "INSERT INTO users(user_id, invited_by) VALUES (?, ?)",
+                (user.id, inviter)
+            )
+
+            if inviter:
+                con.execute(
+                    "UPDATE users SET balance=balance+1 WHERE user_id=?",
+                    (inviter,)
+                )
+
+    await update.message.reply_text(
+        "أهلاً فيك ببوت الإحالات 🎉\nاختار من القائمة:",
+        reply_markup=menu()
+    )
+
+
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    with sqlite3.connect(DB) as con:
+        row = con.execute(
+            "SELECT balance, banned FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+
+        if not row or row[1]:
+            await query.message.reply_text("🚫 لا يمكنك استخدام البوت.")
+            return
+
+        balance = row[0]
+
+        if query.data == "balance":
+            text = f"💰 رصيدك الحالي: {balance:.2f}"
+        elif query.data == "refs":
+            count = con.execute(
+                "SELECT COUNT(*) FROM users WHERE invited_by=?",
+                (user_id,)
+            ).fetchone()[0]
+            text = f"👥 عدد إحالاتك: {count}"
+        elif query.data == "ref":
+            bot = await context.bot.get_me()
+            text = f"🔗 رابط دعوتك:\nhttps://t.me/{bot.username}?start={user_id}"
+        elif query.data == "gift":
+            text = "🎁 ميزة أكواد الهدايا رح نضيفها بالخطوة التالية."
+        elif query.data == "withdraw":
+            text = "💸 ميزة طلبات السحب رح نضيفها بالخطوة التالية."
+        else:
+            text = "اختار من القائمة الرئيسية."
+
+    await query.message.reply_text(text, reply_markup=menu())
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN غير مضبوط.")
+    init_db()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
